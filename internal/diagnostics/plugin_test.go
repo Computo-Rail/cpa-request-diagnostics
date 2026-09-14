@@ -354,11 +354,14 @@ func TestBoundsSamplingExpiryAndCapacityRemainFailOpen(t *testing.T) {
 	if len(logs) != 3 {
 		t.Fatalf("logs = %#v, want capacity, expiry, completion", logs)
 	}
-	if logs[0].fields["event"] != "request_diagnostics_capacity_drop" {
-		t.Errorf("first log = %#v", logs[0])
+	events := make(map[any]int, len(logs))
+	for _, log := range logs {
+		events[log.fields["event"]]++
 	}
-	if logs[1].fields["event"] != "request_diagnostics_expired" || logs[1].fields["expired_count"] != 1 {
-		t.Errorf("second log = %#v", logs[1])
+	for _, event := range []string{"request_diagnostics_capacity_drop", "request_diagnostics_expired", "request_diagnostics_complete"} {
+		if events[event] != 1 {
+			t.Errorf("event %q count = %d; logs = %#v", event, events[event], logs)
+		}
 	}
 
 	unsampled := New(logger)

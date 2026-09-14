@@ -10,6 +10,7 @@ permissions:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -20,8 +21,17 @@ jobs:
           go-version: '1.26.x'
           cache: true
       - if: runner.os == 'Windows'
-        run: choco install make mingw -y
-      - run: make check
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: make mingw-w64-ucrt-x86_64-gcc
+          path-type: inherit
+      - if: runner.os != 'Windows'
+        run: make check
         shell: bash
-      - run: make host-smoke
+      - if: runner.os != 'Windows'
+        run: make host-smoke
         shell: bash
+      - if: runner.os == 'Windows'
+        run: make check && make host-smoke
+        shell: msys2 {0}
