@@ -661,9 +661,14 @@ func (p *Plugin) signalExpiryLoop() {
 }
 
 func (p *Plugin) log(callbackID, level string, fields map[string]any) {
-	if p.logger != nil {
-		p.logger.Log(callbackID, level, "CPA request diagnostics", fields)
+	if p.logger == nil {
+		return
 	}
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		return
+	}
+	p.logger.Log(callbackID, level, "CPA request diagnostics "+string(payload), fields)
 }
 
 func (p *Plugin) logPolicy(revision uint64, callbackID, level string, fields map[string]any) {

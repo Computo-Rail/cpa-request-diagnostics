@@ -109,6 +109,12 @@ emitted by the plugin; CLIProxyAPI's host logger injects it from the callback
 context and may overwrite a same-named plugin field. Expiry housekeeping logs
 have no callback context, so they contain neither identifier.
 
+CLIProxyAPI v7.2.159's host log formatter prints only a small field allowlist.
+The plugin therefore serializes the diagnostic record into the log message as
+`CPA request diagnostics {json}` so `event`, timings, outcome, and correlation
+maps survive ordinary Docker logs. The same JSON is still passed as structured
+fields for hosts that render them.
+
 CLIProxyAPI searches `<dir>/<goos>/<goarch>/` before the directory root. The host
 recognizes the release target's `-v<version>` suffix while preserving the plugin
 ID.

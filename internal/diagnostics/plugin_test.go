@@ -249,6 +249,7 @@ log_level: info
 	if selection.callbackID != "callback-after" || selection.fields["event"] != "request_diagnostics_selection" {
 		t.Fatalf("selection log = %#v", selection)
 	}
+	assertMessageCarriesFields(t, selection)
 	if selection.fields["selection_index"] != 0 || selection.fields["selection_elapsed_ms"] != int64(3) {
 		t.Errorf("selection timing = %#v", selection.fields)
 	}
@@ -260,6 +261,7 @@ log_level: info
 	if completionLog.callbackID != "callback-complete" || completionLog.fields["event"] != "request_diagnostics_complete" {
 		t.Fatalf("completion log = %#v", completionLog)
 	}
+	assertMessageCarriesFields(t, completionLog)
 	wantValues := map[string]any{
 		"selection_count":       1,
 		"response_headers_ms":   int64(10),
@@ -620,6 +622,36 @@ func TestReconfigureAppliesReducedSamplingAndCapacityToActiveState(t *testing.T)
 	for requestID := range plugin.active {
 		if !sampled(requestID, 0.5) {
 			t.Errorf("request %q remained active after reduced sampling", requestID)
+		}
+	}
+}
+
+func assertMessageCarriesFields(t *testing.T, log capturedLog) {
+	t.Helper()
+	const prefix = "CPA request diagnostics "
+	if !strings.HasPrefix(log.message, prefix) {
+		t.Fatalf("message = %q, want JSON payload prefix", log.message)
+	}
+	var encoded map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(log.message, prefix)), &encoded); err != nil {
+		t.Fatalf("decode message payload %q: %v", log.message, err)
+	}
+	for key, value := range log.fields {
+		got, ok := encoded[key]
+		if !ok {
+			t.Errorf("message missing field %q", key)
+			continue
+		}
+		gotJSON, err := json.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantJSON, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotJSON) != string(wantJSON) {
+			t.Errorf("message field %q = %s, want %s", key, gotJSON, wantJSON)
 		}
 	}
 }
