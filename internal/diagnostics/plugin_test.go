@@ -127,6 +127,119 @@ func TestRegistrationRejectsOldHostSchema(t *testing.T) {
 	}
 }
 
+func TestRegistrationNegotiatesHostSchema(t *testing.T) {
+	for _, hostSchema := range []uint32{5, 6} {
+		t.Run(fmt.Sprintf("schema-%d", hostSchema), func(t *testing.T) {
+			plugin := New(&captureLogger{})
+			t.Cleanup(plugin.Shutdown)
+			raw, err := json.Marshal(lifecycleRequest{SchemaVersion: hostSchema})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := decodeEnvelope(t, plugin.Call(pluginabi.MethodPluginRegister, raw))
+			if !response.OK {
+				t.Fatalf("registration failed: %+v", response.Error)
+			}
+			var registered registration
+			if err := json.Unmarshal(response.Result, &registered); err != nil {
+				t.Fatal(err)
+			}
+			if registered.SchemaVersion != hostSchema {
+				t.Fatalf("schema_version = %d, want %d", registered.SchemaVersion, hostSchema)
+			}
+		})
+	}
+}
+
+func TestTerminalFailureClassificationIsBoundedAndBodyBlind(t *testing.T) {
+	tests := []struct {
+		name       string
+		errorValue string
+		want       string
+	}{
+		{name: "TLS handshake", errorValue: `Post "https://private.example/v1": utls: TLS handshake: read tcp 10.0.0.1:43122->192.0.2.1:443: connection timed out`, want: "tls"},
+		{name: "dial", errorValue: "dial tcp 192.0.2.1:443: i/o timeout", want: "dial"},
+		{name: "read", errorValue: "read tcp 10.0.0.1:43122->192.0.2.1:443: i/o timeout", want: "read"},
+		{name: "EOF", errorValue: "unexpected EOF", want: "read"},
+		{name: "deadline", errorValue: "context deadline exceeded", want: "timeout"},
+		{name: "unknown", errorValue: "credential=/var/lib/cliproxy/auth/alice@example.com.json url=https://user:pass@private.example/v1 Authorization=Bearer-secret BODY-SENTINEL", want: "other"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			logger := &captureLogger{}
+			plugin := New(logger)
+			t.Cleanup(plugin.Shutdown)
+			if response := configureForTest(t, plugin, ""); !response.OK {
+				t.Fatal(response.Error)
+			}
+			assertOK(t, plugin.Call(pluginabi.MethodRequestInterceptBefore, []byte(`{"RequestID":"request","Headers":{}}`)))
+			completion, err := json.Marshal(completionWire{RequestID: "request", Outcome: "failed", Error: test.errorValue, HostCallbackID: "complete"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertOK(t, plugin.Call(pluginabi.MethodRequestComplete, completion))
+			logs := logger.snapshot()
+			if len(logs) != 1 {
+				t.Fatalf("logs = %#v, want one completion", logs)
+			}
+			if got := logs[0].fields["error_class"]; got != test.want {
+				t.Errorf("error_class = %#v, want %q", got, test.want)
+			}
+			encoded, err := json.Marshal(logs[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, forbidden := range []string{test.errorValue, "alice@example.com.json", "https://user:pass@private.example/v1", "Authorization=Bearer-secret", "/var/lib/cliproxy/auth", "BODY-SENTINEL"} {
+				if strings.Contains(string(encoded), forbidden) {
+					t.Errorf("diagnostic log leaked %q: %s", forbidden, encoded)
+				}
+			}
+		})
+	}
+}
+
+func TestTerminalFailureClassificationRejectsProviderTextFalsePositives(t *testing.T) {
+	for _, value := range []string{
+		"provider response: dial tcp 192.0.2.1:443: i/o timeout",
+		"provider response: utls: TLS handshake: read tcp 10.0.0.1:43122->192.0.2.1:443: connection timed out",
+		"provider response: read tcp 10.0.0.1:43122->192.0.2.1:443: connection reset by peer",
+		"provider response: context deadline exceeded",
+		`{"error":"dial tcp 192.0.2.1:443: i/o timeout"}`,
+		`x509: {"error":"certificate signed by unknown authority"}`,
+		"x509: provider failure",
+	} {
+		if got := classifyTerminalError(value); got != "other" {
+			t.Errorf("classifyTerminalError(%q) = %q, want other", value, got)
+		}
+	}
+}
+
+func TestErrorClassAppearsOnlyOnFailedCompletion(t *testing.T) {
+	for _, outcome := range []string{"succeeded", "rejected", "canceled"} {
+		t.Run(outcome, func(t *testing.T) {
+			logger := &captureLogger{}
+			plugin := New(logger)
+			t.Cleanup(plugin.Shutdown)
+			if response := configureForTest(t, plugin, ""); !response.OK {
+				t.Fatal(response.Error)
+			}
+			assertOK(t, plugin.Call(pluginabi.MethodRequestInterceptBefore, []byte(`{"RequestID":"request","Headers":{}}`)))
+			completion := fmt.Sprintf(`{"RequestID":"request","Outcome":%q,"Error":"dial tcp secret.example:443: i/o timeout"}`, outcome)
+			assertOK(t, plugin.Call(pluginabi.MethodRequestComplete, []byte(completion)))
+			logs := logger.snapshot()
+			if len(logs) != 1 {
+				t.Fatalf("logs = %#v, want one completion", logs)
+			}
+			if _, exists := logs[0].fields["error_class"]; exists {
+				t.Fatalf("error_class emitted for %q: %#v", outcome, logs[0].fields)
+			}
+			if strings.Contains(logs[0].message, "secret.example") {
+				t.Fatalf("raw error leaked for %q: %s", outcome, logs[0].message)
+			}
+		})
+	}
+}
+
 func TestConfigurationAcceptsOnlyDiagnosticIdentifierHeaders(t *testing.T) {
 	for _, config := range []string{
 		"correlation_request_headers: [Authorization]\n",

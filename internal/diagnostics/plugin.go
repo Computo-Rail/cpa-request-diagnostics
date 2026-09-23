@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -132,6 +133,7 @@ type completionWire struct {
 	Stream         bool
 	Outcome        string
 	StatusCode     int
+	Error          string
 	HostCallbackID string `json:"host_callback_id"`
 }
 
@@ -249,12 +251,12 @@ func (p *Plugin) configure(raw []byte) (registration, error) {
 	p.logMu.Unlock()
 	p.signalExpiryLoop()
 
-	return pluginRegistration(), nil
+	return pluginRegistration(min(req.SchemaVersion, pluginabi.SchemaVersion)), nil
 }
 
-func pluginRegistration() registration {
+func pluginRegistration(schemaVersion uint32) registration {
 	return registration{
-		SchemaVersion: pluginabi.SchemaVersion,
+		SchemaVersion: schemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             pluginName,
 			Version:          Version,
@@ -515,7 +517,11 @@ func (p *Plugin) complete(raw []byte) struct{} {
 	fields["event"] = "request_diagnostics_complete"
 	fields["selection_count"] = state.selectionCount
 	fields["total_ms"] = elapsedMS(state.startedAt, now)
-	fields["outcome"] = sanitizeOutcome(req.Outcome)
+	outcome := sanitizeOutcome(req.Outcome)
+	fields["outcome"] = outcome
+	if outcome == "failed" {
+		fields["error_class"] = classifyTerminalError(req.Error)
+	}
 	status := req.StatusCode
 	if status == 0 {
 		status = state.responseStatus
@@ -758,6 +764,40 @@ func sanitizeOutcome(value string) string {
 		return "unknown"
 	}
 }
+
+// classifyTerminalError deliberately accepts only complete, standard Go
+// transport errors. Provider-controlled text can resemble a network error, so
+// unknown wrappers remain "other" instead of being misattributed.
+func classifyTerminalError(value string) string {
+	value = strings.TrimSpace(value)
+	if wrapped := terminalURLError.FindStringSubmatch(value); wrapped != nil {
+		value = wrapped[1]
+	}
+	if terminalTLSError.MatchString(value) || terminalX509Error.MatchString(value) {
+		return "tls"
+	}
+	if terminalDialError.MatchString(value) || terminalLookupError.MatchString(value) {
+		return "dial"
+	}
+	if terminalReadError.MatchString(value) || terminalUnexpectedEOF.MatchString(value) {
+		return "read"
+	}
+	if terminalTimeoutError.MatchString(value) {
+		return "timeout"
+	}
+	return "other"
+}
+
+var (
+	terminalURLError      = regexp.MustCompile(`(?i)^(?:get|post|put|patch|delete|head|options|connect) "https?://(?:\\.|[^"\\\r\n])+": (.+)$`)
+	terminalTLSError      = regexp.MustCompile(`(?i)^(?:net/http: tls handshake (?:timeout|timed out|connection timed out)|(?:tls|utls): tls handshake(?: (?:timeout|timed out|connection timed out)|: (?:read|write) tcp(?:4|6)? \S+->\S+: (?:(?:read|write): )?(?:connection timed out|connection reset by peer|broken pipe|i/o timeout|operation timed out|unexpected eof|eof|use of closed network connection))?)$`)
+	terminalX509Error     = regexp.MustCompile(`(?i)^x509: (?:certificate signed by unknown authority(?: \(possibly because of "[^"{}\r\n]+" while trying to verify candidate authority certificate "[^"{}\r\n]+"\))?|certificate is valid for [^{}\r\n]+, not [^{}\s]+|certificate has expired or is not yet valid: current time [^{}\r\n]+ is (?:before|after) [^{}\r\n]+|cannot validate certificate for [^{}\s]+ because it doesn't contain any ip sans|certificate is not valid for any names, but wanted to match [^{}\s]+|certificate relies on legacy common name field, use sans instead)$`)
+	terminalDialError     = regexp.MustCompile(`(?i)^dial (?:tcp|udp)(?:4|6)?(?: \S+)?: (?:lookup \S+(?: on \S+)?: (?:no such host|server misbehaving|temporary failure in name resolution|i/o timeout)|connect: (?:connection refused|network is unreachable|host is unreachable|no route to host|connection timed out|i/o timeout|operation timed out)|connection refused|network is unreachable|host is unreachable|no route to host|connection timed out|i/o timeout|operation timed out)$`)
+	terminalLookupError   = regexp.MustCompile(`(?i)^lookup \S+(?: on \S+)?: (?:no such host|server misbehaving|temporary failure in name resolution|(?:read|write) udp(?:4|6)? \S+->\S+: i/o timeout|i/o timeout)$`)
+	terminalReadError     = regexp.MustCompile(`(?i)^(?:(?:read|write) tcp(?:4|6)? \S+->\S+: (?:(?:read|write): )?(?:connection timed out|connection reset by peer|broken pipe|i/o timeout|operation timed out|unexpected eof|eof|use of closed network connection)|(?:read|write): broken pipe)$`)
+	terminalUnexpectedEOF = regexp.MustCompile(`(?i)^unexpected eof$`)
+	terminalTimeoutError  = regexp.MustCompile(`(?i)^(?:context deadline exceeded(?: \(client\.timeout exceeded while awaiting headers\))?|net/http: (?:request canceled while waiting for connection \(client\.timeout exceeded while awaiting headers\)|timeout awaiting response headers)|client\.timeout exceeded while awaiting headers|i/o timeout)$`)
+)
 
 func sampled(requestID string, rate float64) bool {
 	if rate <= 0 {

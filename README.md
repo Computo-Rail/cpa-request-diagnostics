@@ -15,11 +15,30 @@ storage capabilities, and it never modifies proxy requests or responses.
 - credential selection count
 - response-header, first-stream-event, and total durations
 - terminal status and outcome
+- bounded final terminal failure class (`tls`, `dial`, `read`, `timeout`, or
+  `other`)
 - configured upstream response request-ID headers
 
 `selection_count` is an observation count. It is not an exact retry count or a
 provider-attempt result trail because CLIProxyAPI v7.2.159 does not expose those
 events through the plugin ABI.
+
+`error_class` is derived only from the final terminal error when the outcome is
+`failed`. It is not evidence about any individual upstream attempt or retry, and
+the raw error string is neither retained nor logged. Successful, rejected, and
+canceled completions do not include `error_class`.
+
+Classification accepts only a complete recognized Go transport error or one
+standard `net/url.Error`-style wrapper containing an HTTP method and quoted
+HTTP(S) URL. Unknown wrappers are classified as `other`, even when their suffix
+resembles a transport error. This deliberately favors conservative false
+negatives over interpreting provider-controlled prose or response bodies.
+
+The plugin creates request state at its intercept-before callback. A
+higher-priority interceptor that terminates first can prevent that callback from
+observing the request, so no completion diagnostic or terminal classification is
+available for that request. Terminal classification applies only to requests
+observed at intercept-before.
 
 ## What it does not collect
 
@@ -61,11 +80,11 @@ remain the plugin ID.
 Build a versioned release artifact with one authoritative version input:
 
 ```bash
-make release VERSION=0.1.0
+make release VERSION=0.2.0
 ```
 
-This embeds `0.1.0` in plugin metadata and writes
-`cpa-request-diagnostics-v0.1.0.<extension>`.
+This embeds `0.2.0` in plugin metadata and writes
+`cpa-request-diagnostics-v0.2.0.<extension>`.
 
 ## Configuration
 
