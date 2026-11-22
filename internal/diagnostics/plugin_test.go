@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type capturedLog struct {
@@ -17,6 +19,52 @@ type capturedLog struct {
 	level      string
 	message    string
 	fields     map[string]any
+}
+
+func TestTrustedTerminalFailurePrivacyAndFinalState(t *testing.T) {
+	good := `{"version":1,"return_origin":"upstream","failure_stage":"http_response","safe_error_code":"upstream_http_error"}`
+	for _, tc := range []struct {
+		name, outcome, object, origin string
+		status                        int
+	}{
+		{"provider", "rejected", good, "upstream", 429},
+		{"local", "failed", `{"version":1,"return_origin":"local","failure_stage":"selection","safe_error_code":"model_cooldown"}`, "local", 429},
+		{"old_host", "failed", `null`, "unknown", 0},
+		{"canceled", "canceled", good, "unknown", 0},
+		{"success", "succeeded", good, "unknown", 200},
+		{"future", "failed", strings.Replace(good, `"version":1`, `"version":2`, 1), "unknown", 429},
+		{"extra", "failed", strings.Replace(good, `}`, `,"raw":"PRIVATE-SECRET-SENTINEL"}`, 1), "unknown", 429},
+		{"spoof", "failed", strings.Replace(good, `upstream_http_error`, `PRIVATE-SECRET-SENTINEL`, 1), "unknown", 429},
+		{"duplicate", "failed", strings.Replace(good, `}`, `,"return_origin":"local"}`, 1), "unknown", 429},
+		{"wrong_pair", "failed", strings.Replace(good, `"upstream"`, `"local"`, 1), "unknown", 429},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := &captureLogger{}
+			plugin := New(logger)
+			t.Cleanup(plugin.Shutdown)
+			require.True(t, configureForTest(t, plugin, "").OK)
+			assertOK(t, plugin.Call(pluginabi.MethodRequestInterceptBefore, []byte(`{"RequestID":"req","Headers":{}}`)))
+			// A previously observed error response must not supply final status.
+			assertOK(t, plugin.Call(pluginabi.MethodResponseInterceptAfter, []byte(`{"RequestID":"req","StatusCode":503}`)))
+			complete := []byte(fmt.Sprintf(`{"RequestID":"req","Outcome":%q,"StatusCode":%d,"Error":"PRIVATE-SECRET-SENTINEL","Metadata":{"private":"PRIVATE-SECRET-SENTINEL","terminal_failure":%s}}`, tc.outcome, tc.status, tc.object))
+			assertOK(t, plugin.Call(pluginabi.MethodRequestComplete, complete))
+			assertOK(t, plugin.Call(pluginabi.MethodRequestComplete, complete))
+			logs := logger.snapshot()
+			require.Len(t, logs, 1)
+			failure, ok := logs[0].fields["terminal_failure"].(terminalFailure)
+			require.True(t, ok)
+			assert.Equal(t, tc.origin, failure.ReturnOrigin)
+			if tc.status == 0 || tc.outcome == "canceled" {
+				assert.NotContains(t, logs[0].fields, "status")
+			} else {
+				assert.Equal(t, tc.status, logs[0].fields["status"])
+			}
+			encoded, err := json.Marshal(logs[0].fields)
+			require.NoError(t, err)
+			assert.NotContains(t, string(encoded)+logs[0].message, "PRIVATE-SECRET-SENTINEL")
+			assert.Zero(t, activeCount(plugin))
+		})
+	}
 }
 
 type captureLogger struct {
@@ -763,9 +811,7 @@ func assertMessageCarriesFields(t *testing.T, log capturedLog) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(gotJSON) != string(wantJSON) {
-			t.Errorf("message field %q = %s, want %s", key, gotJSON, wantJSON)
-		}
+		assert.JSONEq(t, string(wantJSON), string(gotJSON), "message field %q", key)
 	}
 }
 

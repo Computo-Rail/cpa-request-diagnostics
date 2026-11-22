@@ -134,7 +134,73 @@ type completionWire struct {
 	Outcome        string
 	StatusCode     int
 	Error          string
+	Metadata       json.RawMessage
 	HostCallbackID string `json:"host_callback_id"`
+}
+
+// terminalFailure is the host's versioned, content-free terminal projection.
+// Decode only this object: arbitrary host metadata is never retained or logged.
+type terminalFailure struct {
+	Version       int    `json:"version"`
+	ReturnOrigin  string `json:"return_origin"`
+	FailureStage  string `json:"failure_stage"`
+	SafeErrorCode string `json:"safe_error_code"`
+}
+
+func decodeTerminalFailure(metadata json.RawMessage, outcome string) terminalFailure {
+	unknown := terminalFailure{1, "unknown", "unknown", "unknown"}
+	if outcome != "failed" && outcome != "rejected" {
+		return unknown
+	}
+	var selected struct {
+		TerminalFailure json.RawMessage `json:"terminal_failure"`
+	}
+	if json.Unmarshal(metadata, &selected) != nil {
+		return unknown
+	}
+	raw := selected.TerminalFailure
+	// A tiny exact object contract also rejects duplicate keys instead of
+	// silently accepting the last value of a purported trusted field.
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return unknown
+	}
+	fields := make(map[string]json.RawMessage, 4)
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return unknown
+		}
+		name, ok := key.(string)
+		if !ok || (name != "version" && name != "return_origin" && name != "failure_stage" && name != "safe_error_code") {
+			return unknown
+		}
+		if _, duplicate := fields[name]; duplicate {
+			return unknown
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return unknown
+		}
+		fields[name] = value
+	}
+	if _, err := decoder.Token(); err != nil || len(fields) != 4 {
+		return unknown
+	}
+	var failure terminalFailure
+	if json.Unmarshal(raw, &failure) != nil || failure.Version != 1 {
+		return unknown
+	}
+	switch failure.ReturnOrigin + "/" + failure.FailureStage + "/" + failure.SafeErrorCode {
+	case "upstream/http_response/upstream_http_error",
+		"local/selection/auth_not_found", "local/selection/auth_unavailable", "local/selection/model_cooldown",
+		"local/request/local_rejection", "local/request/invalid_request",
+		"local/response/response_translation", "local/stream/stream_incomplete":
+		return failure
+	default:
+		return unknown
+	}
 }
 
 type envelope struct {
@@ -519,14 +585,12 @@ func (p *Plugin) complete(raw []byte) struct{} {
 	fields["total_ms"] = elapsedMS(state.startedAt, now)
 	outcome := sanitizeOutcome(req.Outcome)
 	fields["outcome"] = outcome
+	fields["terminal_failure"] = decodeTerminalFailure(req.Metadata, outcome)
 	if outcome == "failed" {
 		fields["error_class"] = classifyTerminalError(req.Error)
 	}
 	status := req.StatusCode
-	if status == 0 {
-		status = state.responseStatus
-	}
-	if status >= 100 && status <= 599 {
+	if outcome != "canceled" && status >= 100 && status <= 599 {
 		fields["status"] = status
 	}
 	if state.responseHeadersMS != nil {

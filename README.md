@@ -54,6 +54,29 @@ classified heuristically.
 
 ## Compatibility
 
+### Terminal failure contract (0.3.0)
+
+The completion callback may provide `Metadata.terminal_failure`, a four-field
+object: `version: 1`, `return_origin`, `failure_stage`, `safe_error_code`.
+Only the registered combinations are emitted in the same completion record:
+`upstream/http_response/upstream_http_error`,
+`local/selection/{auth_not_found,auth_unavailable,model_cooldown}`,
+`local/request/{local_rejection,invalid_request}`,
+`local/response/response_translation`, and `local/stream/stream_incomplete`.
+Missing, malformed, duplicate, extra or future fields/codes produce the fixed
+`unknown/unknown/unknown` object. Arbitrary metadata and raw errors are not emitted.
+Successful and canceled requests always carry the unknown object; terminal status
+comes only from the completion, never an earlier observed response. Legacy
+`error_class` remains a separate limited classification, not a trusted origin.
+
+An upstream HTTP 429 does not identify the ultimate provider or establish quota
+exhaustion. This contract describes the final return, not an attempt history.
+Old hosts remain supported with unknown provenance; old plugins ignore the host's
+new metadata. State expiry, capacity, sampling and interceptor ordering still
+limit coverage. No new request is synthesized when request state is missing.
+The host producer patch and v8.0.64 compatibility/build evidence are owned by
+Computorail CT-276/CT-277, not by the historical v7 smoke entry below.
+
 - CLIProxyAPI v7.2.159
 - native plugin ABI 1
 - RPC schema 5 or newer
